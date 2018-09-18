@@ -1,0 +1,106 @@
+# Last version explained.
+#
+# In simple words:
+# 1) Iterate over set of distances
+#  2) Remove some ones from source matrix and make a copy
+#   3) Add some ones to obtained matrix, but keep in track not to put ones where they were in source matrix
+#  4)Number of one removes and one appends should be equal to selected distance
+#
+# Advanced:
+# Let m = ones count in source matrix
+#     n = rows count in source matrix
+#     k = columns count in source matrix
+#     d = distance from distances set
+#     r = number of removed ones
+#     d' = distance remained to get up to d after one removes (d' = d - r)
+#     depth = maximal number of rows to brute force in fast part of algorithm
+#
+#
+# 1) Iterate over set of distances set
+#  2) Check some special cases for d (d=0 and d=1), and for distance correctness (d >= 0 and d <= m + n)
+#  3) Select count of ones to remove r
+#   4) Select rows with ones via itertools.combinations
+#    5) Make a copy of source matrix and remove ones from rows selected on previous stage
+#    6) If d' == 0 - then we need to yield obtained matrix and goto (4)
+#    7) Otherwise split d' into two parts: slow and fast computation schemes (slow_depth + fast_depth = d')
+#       Also keep in mind that (fast_depth <= depth) to prevent active memory usage
+#    8) Select d' rows from zero rows of the new matrix
+#     9) Split them into two groups: slow and fast
+#     10) Create indices array that will put 'fast_depth' ones into matrix cache later
+#         In simple words, we create index array that contains all positions of all ones to be added by the fast part of the algorithm
+#         This index array is computing via sum of three values:
+#          1. product of column indices for each row from fast rows, where one can be added;
+#          2. row offsets to put one into right position of matrix (i.e., i*k + j);
+#          3. matrix offsets that forward all indices to corresponding matrices (finally, q*(n*k) + i*k + j)
+#         Also we compute 'complexity' of our fast part, which is a count of different matrices that could be obtained
+#           by adding 'fast_depth' ones into 'fast_depth' rows selected before
+#     11) Iterate over all combinations of free places (places where before weren't ones) for slow rows via itertools.product
+#      12) Make a copy of obtained matrix, and put there ones, defined by [slow rows, slow cols]
+#      13) Create cache of size='complexity' via tile, using newest matrix (with removed ones, and appended slow ones)
+#      14) Fill this cache via putting ones into calculated fast indices
+#      15) Yielding all matrices from cache via 'yield from cache'
+#
+# Expert:
+#
+for distance in distances:
+
+	if distance < 0 or distance > ones_count + n:
+		continue
+	if distance == 0:
+		yield m.copy()
+		continue
+	if distance == 1:
+		for i in range(n):
+			if has_one[i]:
+				m1 = m.copy()
+				m1[i] = 0
+				yield m1
+			else:
+				for j in range(k):
+					m1 = m.copy()
+					m1[i, j] = 1
+					yield m1
+		continue
+
+	# not needed before
+	if fast_max_depth is None:
+		fast_max_depth = calculate_max_depth(n, k, ram_limit=ram_limit)
+		zero_indices = np.array([np.array(get_zero_indices(where_one[row], k), dtype=np.int32) for row in range(n)])
+
+	for num_ones_removed in range(np.min([distance, ones_count]) + 1):
+		for one_remove_rows in combinations(one_pos[0], num_ones_removed):
+
+			m1 = m.copy()
+			m1[one_remove_rows, :] = 0
+			new_zero_rows = np.append(zero_rows, np.array(one_remove_rows, dtype=np.int32))
+			new_distance = distance - num_ones_removed
+			if new_distance == 0:
+				yield m1
+				continue
+
+			fast_depth = np.min([fast_max_depth, new_distance])
+			slow_depth = new_distance - fast_depth
+
+			for one_append_rows in combinations(new_zero_rows, new_distance):
+
+				slow_rows = one_append_rows[:slow_depth]
+				fast_rows = one_append_rows[slow_depth:]
+
+				slow_rows_np = np.array(slow_rows, dtype=np.int32)*k
+				fast_rows_np = np.array(fast_rows, dtype=np.int32)*k
+
+				slow_col_indices = [zero_indices[row] for row in slow_rows]
+				fast_col_indices = [zero_indices[row] for row in fast_rows]
+
+				cache_size = int(np.prod(np.array([col.size for col in fast_col_indices], dtype=np.int32)))
+				indices = (np.array(np.meshgrid(*fast_col_indices, copy=False)).T.reshape(-1, fast_depth)
+						   + fast_rows_np).T + (np.arange(cache_size)*matrix_size)
+
+				for slow_cols in product(*slow_col_indices):
+
+					m2 = m1.copy()
+					m2.put(slow_rows_np + np.array(slow_cols, dtype=np.int32), 1)
+
+					matrix_cache = np.tile(m2, (cache_size, 1, 1))
+					matrix_cache.put(indices, 1)
+					yield from matrix_cache
